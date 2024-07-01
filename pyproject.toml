@@ -10,7 +10,7 @@ authors = [{ name = "InstructLab", email = "dev@instructlab.ai" }]
 description = "CLI for interacting with InstructLab"
 readme = "README.md"
 license = { text = "Apache-2.0 AND MIT" }
-requires-python = ">=3.9"
+requires-python = ">=3.10,<3.12"
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -20,10 +20,8 @@ classifiers = [
   "Operating System :: POSIX :: Linux",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: Implementation :: CPython",
 ]
 dynamic = ["dependencies", "optional-dependencies", "version"]
@@ -47,6 +45,8 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
+optional-dependencies.hpu = { file = ["requirements-hpu.txt"] }
+optional-dependencies.vllm-cuda = { file = ["requirements-vllm-cuda.txt"] }
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -59,13 +59,7 @@ include = [
   "instructlab.train.lora_mlx.models",
   "instructlab.llamacpp",
   "instructlab.mlx_explore",
-  "instructlab.schema.v1",
-  "instructlab.schema.v2",
 ]
-
-[tool.setuptools.package-data]
-"instructlab.schema.v1" = ["*.json"]
-"instructlab.schema.v2" = ["*.json"]
 
 [tool.check-wheel-contents]
 # W002 - Wheel contains duplicate files:
@@ -126,6 +120,7 @@ exclude = [
   "^src/instructlab/model/list\\.py$",
   "^src/instructlab/model/model\\.py$",
   "^src/instructlab/model/train\\.py$",
+  "^src/instructlab/model/evaluate\\.py$",
   "^src/instructlab/config/config\\.py$",
   "^src/instructlab/config/init\\.py$",
   "^src/instructlab/data/data\\.py$",
@@ -142,7 +137,9 @@ exclude = [
   "^src/instructlab/train/lora_mlx/models/mixtral\\.py$",
   "^src/instructlab/train/lora_mlx/models/models\\.py$",
   "^src/instructlab/utils\\.py$",
-  "^src/instructlab/server\\.py$",
+  "^src/instructlab/model/backends/llama_cpp\\.py$",
+  "^src/instructlab/model/backends/vllm\\.py$",
+  "^src/instructlab/model/backends/backends\\.py$",
 ]
 # honor excludes by not following there through imports
 follow_imports = "silent"

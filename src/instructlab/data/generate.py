@@ -8,6 +8,9 @@ import click
 
 # First Party
 from instructlab import configuration as config
+from instructlab import utils
+
+logger = logging.getLogger(__name__)
 
 
 @click.command()
@@ -123,6 +126,7 @@ from instructlab import configuration as config
     help="Force model family to use when picking a generation template",
 )
 @click.pass_context
+@utils.display_params
 def generate(
     ctx,
     model,
@@ -146,46 +150,31 @@ def generate(
 ):
     """Generates synthetic data to enhance your example data"""
     # pylint: disable=C0415
-    # First Party
-    from instructlab.server import ensure_server
+    # Third Party
+    from instructlab.sdg.generate_data import generate_data
+    from instructlab.sdg.utils import GenerateException
 
-    # Local
-    from .generator.generate_data import generate_data
-    from .generator.utils import GenerateException
-
-    server_process = None
-    server_queue = None
-    logger = logging.getLogger("TODO")
     prompt_file_path = config.DEFAULT_PROMPT_FILE
     if ctx.obj is not None:
-        logger = ctx.obj.logger
         prompt_file_path = ctx.obj.config.generate.prompt_file
 
+    backend_instance = None
     if endpoint_url:
         api_base = endpoint_url
     else:
-        # Third Party
-        import llama_cpp
+        # First Party
+        from instructlab.model.backends import backends
 
-        if not llama_cpp.llama_supports_gpu_offload():
-            # TODO: check for working offloading. The function only checks
-            # for compile time defines like `GGML_USE_CUDA`.
-            click.secho(
-                "llama_cpp_python is built without hardware acceleration. "
-                "ilab generate will be very slow.",
-                fg="red",
-            )
+        ctx.obj.config.serve.llama_cpp.llm_family = model_family
+        backend_instance = backends.select_backend(logger, ctx.obj.config.serve)
 
         try:
-            server_process, api_base, server_queue = ensure_server(
-                ctx.obj.logger,
-                ctx.obj.config.serve,
-                tls_insecure,
-                tls_client_cert,
-                tls_client_key,
-                tls_client_passwd,
-                model_family,
+            # Run the llama server
+            backend_instance.run_detached(
+                tls_insecure, tls_client_cert, tls_client_key, tls_client_passwd
             )
+            # api_base will be set by run_detached
+            api_base = backend_instance.api_base
         except Exception as exc:
             click.secho(f"Failed to start server: {exc}", fg="red")
             raise click.exceptions.Exit(1)
@@ -196,7 +185,7 @@ def generate(
             f"Generating synthetic data using '{model}' model, taxonomy:'{taxonomy_path}' against {api_base} server"
         )
         generate_data(
-            logger=logger,
+            logger=logging.getLogger("instructlab.sdg"),  # TODO: remove
             api_base=api_base,
             api_key=api_key,
             model_family=model_family,
@@ -224,8 +213,5 @@ def generate(
         )
         raise click.exceptions.Exit(1)
     finally:
-        if server_process and server_queue:
-            server_process.terminate()
-            server_process.join(timeout=30)
-            server_queue.close()
-            server_queue.join_thread()
+        if backend_instance is not None:
+            backend_instance.shutdown()

@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Standard
+import logging
+import pathlib
+
 # Third Party
 import click
 
 # First Party
 from instructlab import configuration as config
-from instructlab import log
-from instructlab.server import ServerException, server
+from instructlab import log, utils
+from instructlab.model.backends.llama_cpp import ServerException
+
+logger = logging.getLogger(__name__)
 
 
 @click.command()
@@ -38,33 +44,94 @@ from instructlab.server import ServerException, server
     type=click.Path(),
     help="Log file path to write server logs to.",
 )
+@click.option(
+    "--backend",
+    type=click.STRING,  # purposely not using click.Choice to allow for auto-detection
+    help=(
+        "The backend to use for serving the model."
+        "Automatically detected based on the model file properties."
+        "Supported: 'llama-cpp'."
+    ),
+)
+@click.option(
+    "--vllm-args",
+    type=str,
+    help="Specific arguments to pass into vllm. The value passed into this flag must be surrounded by double quotes.\n Example: --vllm-args '--dtype auto --enable-lora'",
+)
 @click.pass_context
+@utils.display_params
 def serve(
-    ctx, model_path, gpu_layers, num_threads, max_ctx_size, model_family, log_file
+    ctx,
+    model_path: pathlib.Path,
+    gpu_layers,
+    num_threads,
+    max_ctx_size,
+    model_family,
+    log_file,
+    backend,
+    vllm_args,
 ):
     """Start a local server"""
-    # pylint: disable=C0415
+    # pylint: disable=import-outside-toplevel
+    # First Party
+    from instructlab.model.backends import backends, llama_cpp, vllm
+
+    host, port = utils.split_hostport(ctx.obj.config.serve.host_port)
+
+    model_path = pathlib.Path(model_path)
+    try:
+        backend = backends.get(logger, model_path, backend)
+    except (ValueError, AttributeError) as e:
+        click.secho(f"Failed to determine backend: {e}", fg="red")
+        raise click.exceptions.Exit(1)
 
     # Redirect server stdout and stderr to the logger
-    log.stdout_stderr_to_logger(ctx.obj.logger, log_file)
+    log.stdout_stderr_to_logger(logger, log_file)
 
-    ctx.obj.logger.info(
+    logger.info(
         f"Using model '{model_path}' with {gpu_layers} gpu-layers and {max_ctx_size} max context size."
     )
 
-    try:
-        host = ctx.obj.config.serve.host_port.split(":")[0]
-        port = int(ctx.obj.config.serve.host_port.split(":")[1])
-        server(
-            ctx.obj.logger,
-            model_path,
-            gpu_layers,
-            max_ctx_size,
-            model_family,
-            num_threads,
-            host,
-            port,
+    logger.info(f"Serving model '{model_path}' with {backend}")
+
+    backend_instance = None
+    if backend == backends.LLAMA_CPP:
+        # Instantiate the llama server
+        if gpu_layers is None:
+            gpu_layers = ctx.obj.config.serve.llama_cpp.gpu_layers
+        if max_ctx_size is None:
+            max_ctx_size = ctx.obj.config.serve.llama_cpp.max_ctx_size
+
+        backend_instance = llama_cpp.Server(
+            logger=logger,
+            api_base=ctx.obj.config.serve.api_base(),
+            model_path=model_path,
+            model_family=model_family,
+            host=host,
+            port=port,
+            gpu_layers=gpu_layers,
+            max_ctx_size=max_ctx_size,
+            num_threads=num_threads,
         )
+
+    if backend == backends.VLLM:
+        # Instantiate the vllm server
+        if vllm_args is None:
+            vllm_args = ""
+
+        backend_instance = vllm.Server(
+            logger=logger,
+            api_base=ctx.obj.config.serve.api_base(),
+            model_path=model_path,
+            vllm_args=vllm_args,
+            host=host,
+            port=port,
+        )
+
+    try:
+        # Run the llama server
+        backend_instance.run()
+
     except ServerException as exc:
         click.secho(f"Error creating server: {exc}", fg="red")
         raise click.exceptions.Exit(1)

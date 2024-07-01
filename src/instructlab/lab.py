@@ -3,9 +3,7 @@
 # pylint: disable=too-many-lines
 
 # Standard
-import logging
 import multiprocessing
-import typing
 
 # Third Party
 import click
@@ -24,14 +22,6 @@ from .taxonomy import taxonomy as taxonomy_group
 # 'fork' is unsafe and incompatible with some hardware accelerators.
 # Python 3.14 will switch to 'spawn' on all platforms.
 multiprocessing.set_start_method(cfg.DEFAULT_MULTIPROCESSING_START_METHOD, force=True)
-
-# Set logging level of OpenAI client and httpx library to ERROR to suppress INFO messages
-logging.getLogger("openai").setLevel(logging.ERROR)
-logging.getLogger("httpx").setLevel(logging.ERROR)
-
-if typing.TYPE_CHECKING:
-    # Third Party
-    import torch
 
 
 class ExpandAliasesGroup(click.Group):
@@ -73,6 +63,7 @@ aliases = {
     "convert": {"group": model_group.model, "cmd": model_group.convert},
     "chat": {"group": model_group.model, "cmd": model_group.chat},
     "test": {"group": model_group.model, "cmd": model_group.test},
+    "evaluate": {"group": model_group.model, "cmd": model_group.evaluate},
     "init": {"group": config_group.config, "cmd": config_group.init},
     "download": {"group": model_group.model, "cmd": model_group.download},
     "diff": {"group": taxonomy_group.taxonomy, "cmd": taxonomy_group.diff},
@@ -95,7 +86,7 @@ aliases = {
 def ilab(ctx, config_file):
     """CLI for interacting with InstructLab.
 
-    If this is your first time running ilab, it's best to start with `ilab init` to create the environment.
+    If this is your first time running ilab, it's best to start with `ilab config init` to create the environment.
     """
     cfg.init(ctx, config_file)
 

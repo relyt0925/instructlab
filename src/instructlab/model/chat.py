@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Optional
 import datetime
 import json
+import logging
 import os
 import sys
 import time
 
 # Third Party
-from huggingface_hub import hf_hub_download
-from huggingface_hub import logging as hf_logging
 from openai import OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
@@ -25,12 +23,14 @@ import httpx
 import openai
 
 # First Party
-from instructlab import client
+from instructlab import client as ilabclient
 from instructlab import configuration as cfg
-from instructlab.server import is_temp_server_running
+from instructlab import utils
 
 # Local
 from ..utils import get_sysprompt, http_client
+
+logger = logging.getLogger(__name__)
 
 HELP_MD = """
 Help / TL;DR
@@ -146,6 +146,7 @@ PROMPT_PREFIX = ">>> "
     help="Force model family to use when picking a chat template",
 )
 @click.pass_context
+@utils.display_params
 def chat(
     ctx,
     question,
@@ -156,7 +157,7 @@ def chat(
     greedy_mode,
     max_tokens,
     endpoint_url,
-    api_key,
+    api_key,  # pylint: disable=unused-argument
     tls_insecure,
     tls_client_cert,
     tls_client_key,
@@ -166,34 +167,37 @@ def chat(
     """Run a chat using the modified model"""
     # pylint: disable=C0415
     # First Party
-    from instructlab.server import ensure_server
+    from instructlab.model.backends.llama_cpp import is_temp_server_running
 
+    # TODO: this whole code block is replicated in generate.py. Refactor to a common function.
+    backend_instance = None
     if endpoint_url:
         api_base = endpoint_url
-        server_process = None
-        server_queue = None
     else:
+        # First Party
+        from instructlab.model.backends import backends
+
+        ctx.obj.config.serve.llama_cpp.llm_family = model_family
+        backend_instance = backends.select_backend(logger, ctx.obj.config.serve)
+
         try:
-            server_process, api_base, server_queue = ensure_server(
-                ctx.obj.logger,
-                ctx.obj.config.serve,
-                tls_insecure,
-                tls_client_cert,
-                tls_client_key,
-                tls_client_passwd,
-                model_family,
+            # Run the llama server
+            backend_instance.run_detached(
+                tls_insecure, tls_client_cert, tls_client_key, tls_client_passwd
             )
+            # api_base will be set by run_detached
+            api_base = backend_instance.api_base
         except Exception as exc:
             click.secho(f"Failed to start server: {exc}", fg="red")
             raise click.exceptions.Exit(1)
         if not api_base:
             api_base = ctx.obj.config.serve.api_base()
 
-    # if only the chat is running (`ilab chat`) and the temp server is not, the chat interacts
-    # in server mode (`ilab serve` is running somewhere, or we are talking to another
+    # if only the chat is running (`ilab model chat`) and the temp server is not, the chat interacts
+    # in server mode (`ilab model serve` is running somewhere, or we are talking to another
     # OpenAI compatible endpoint).
     if not is_temp_server_running():
-        # Try to get the model name right if we know we're talking to a local `ilab serve`.
+        # Try to get the model name right if we know we're talking to a local `ilab model serve`.
         #
         # If the model from the CLI and the one in the config are the same, use the one from the
         # server if they are different else let's use what the user provided
@@ -209,7 +213,7 @@ def chat(
             and api_base == ctx.obj.config.serve.api_base()
         ):
             try:
-                models = client.list_models(
+                models = ilabclient.list_models(
                     api_base=api_base,
                     tls_insecure=tls_insecure,
                     tls_client_cert=tls_client_cert,
@@ -229,11 +233,16 @@ def chat(
                     else model
                 )
 
-            except client.ClientException as exc:
+            except ilabclient.ClientException as exc:
                 click.secho(
                     f"Failed to list models from {api_base}. Please check the API key and endpoint.",
                     fg="red",
                 )
+                # Right now is_temp_server() does not check if a subprocessed vllm is up
+                # shut it down just in case an exception is raised in the try
+                # TODO: revise is_temp_server to check if a vllm server is running
+                if backend_instance is not None:
+                    backend_instance.shutdown()
                 raise click.exceptions.Exit(1) from exc
 
     try:
@@ -253,11 +262,8 @@ def chat(
         click.secho(f"Executing chat failed with: {exc}", fg="red")
         raise click.exceptions.Exit(1)
     finally:
-        if server_process and server_queue:
-            server_process.terminate()
-            server_process.join(timeout=30)
-            server_queue.close()
-            server_queue.join_thread()
+        if backend_instance is not None:
+            backend_instance.shutdown()
 
 
 class ChatException(Exception):
@@ -516,7 +522,12 @@ class ConsoleChatBot:  # pylint: disable=too-many-instance-attributes
         message = {"role": role, "content": content}
         self.info["messages"].append(message)
 
-    def start_prompt(self, logger, content=None, box=True):
+    def start_prompt(
+        self,
+        logger,  # pylint: disable=redefined-outer-name
+        content=None,
+        box=True,
+    ):
         handlers = {
             "/q": self._handle_quit,
             "quit": self._handle_quit,
@@ -673,7 +684,6 @@ def chat_cli(
     max_tokens,
 ):
     """Starts a CLI-based chat with the server"""
-    logger = ctx.obj.logger
     client = OpenAI(
         base_url=api_base,
         api_key=ctx.params["api_key"],
@@ -691,7 +701,7 @@ def chat_cli(
     if not any(model == m for m in model_ids):
         if model == cfg.DEFAULT_MODEL_OLD:
             logger.info(
-                f"Model {model} is not a full path. Try running ilab init or edit your config to have the full model path for serving, chatting, and generation."
+                f"Model {model} is not a full path. Try running ilab config init or edit your config to have the full model path for serving, chatting, and generation."
             )
         raise ChatException(
             f"Model {model} is not served by the server. These are the served models: {model_ids}"

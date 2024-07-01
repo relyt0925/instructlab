@@ -4,11 +4,16 @@
 from os import path
 from re import match
 from typing import Optional
-import logging
 import os
 import sys
 
 # Third Party
+from instructlab.training import (
+    DeepSpeedOptions,
+    LoraOptions,
+    TorchrunArgs,
+    TrainingArgs,
+)
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -30,10 +35,12 @@ DEFAULT_CONFIG = "config.yaml"
 DEFAULT_MODEL_OLD = "merlinite-7b-lab-Q4_K_M"
 DEFAULT_MODEL = "models/merlinite-7b-lab-Q4_K_M.gguf"
 DEFAULT_MODEL_PATH = "models/merlinite-7b-lab-Q4_K_M.gguf"
+DEFAULT_MODEL_REPO = "instructlab/granite-7b-lab"
+DEFAULT_JUDGE_MODEL_MT = "prometheus-eval/prometheus-8x7b-v2.0"
+DEFAULT_EVAL_PATH = "eval_data"
 DEFAULT_TAXONOMY_REPO = "https://github.com/instructlab/taxonomy.git"
 DEFAULT_TAXONOMY_PATH = "taxonomy"
 DEFAULT_TAXONOMY_BASE = "origin/main"
-DEFAULT_YAML_RULES = "yaml_rules.yaml"
 MAX_CONTEXT_SIZE = 4096
 # TODO: these constants should be removed, they should not leak out
 DEFAULT_NUM_CPUS = 10
@@ -55,6 +62,9 @@ MODEL_FAMILIES = set(("merlinite", "mixtral"))
 MODEL_FAMILY_MAPPINGS = {
     "granite": "merlinite",
 }
+
+DEFAULT_CKPT_DIR = "checkpoints"
+DEFAULT_OUT_DIR = "train-output"
 
 
 class ConfigException(Exception):
@@ -130,23 +140,81 @@ class _generate(BaseModel):
     seed_file: StrictStr = "seed_tasks.json"
 
 
+class _serve_vllm(BaseModel):
+    """Class describing configuration of vllm serving backend."""
+
+    # arguments to pass into vllm process
+    vllm_args: str = ""
+
+
+class _serve_llama_cpp(BaseModel):
+    """Class describing configuration of llama-cpp serving backend."""
+
+    gpu_layers: int = -1
+    max_ctx_size: PositiveInt = 4096
+    llm_family: str = ""
+
+
 class _serve(BaseModel):
     """Class describing configuration of the serve sub-command."""
 
     # model configuration
     model_config = ConfigDict(extra="ignore", protected_namespaces=())
 
+    # vllm configuration
+    vllm: _serve_vllm
+
+    # llama-cpp configuration
+    llama_cpp: _serve_llama_cpp
+
     # required fields
     model_path: StrictStr
 
     # additional fields with defaults
     host_port: StrictStr = "127.0.0.1:8000"
-    gpu_layers: int = -1
-    max_ctx_size: PositiveInt = 4096
+    backend: str = ""  # we don't set a default value here since it's auto-detected
 
     def api_base(self):
         """Returns server API URL, based on the configured host and port"""
         return get_api_base(self.host_port)
+
+
+class _mmlu(BaseModel):
+    few_shots: int
+    batch_size: int
+
+
+class _mtbench(BaseModel):
+    judge_model: str
+    output_dir: str
+    max_workers: int
+
+
+class _mtbenchbranch(BaseModel):
+    taxonomy_path: str
+
+
+class _mmlubranch(BaseModel):
+    sdg_path: str
+
+
+class _evaluate(BaseModel):
+    # model configuration
+    model_config = ConfigDict(extra="ignore", protected_namespaces=())
+
+    model: Optional[str] = None
+    base_model: str
+    branch: Optional[str] = None
+    base_branch: Optional[str] = None
+    mmlu: _mmlu
+    mmlu_branch: _mmlubranch
+    mt_bench: _mtbench
+    mt_bench_branch: _mtbenchbranch
+
+
+class _train(BaseModel):
+    train_args: TrainingArgs
+    torch_args: TorchrunArgs
 
 
 class Config(BaseModel):
@@ -159,6 +227,12 @@ class Config(BaseModel):
 
     # additional fields with defaults
     general: _general = _general()
+
+    # train configuration
+    train: Optional[_train] = None
+
+    # evaluate configuration
+    evaluate: _evaluate
 
     # model configuration
     model_config = ConfigDict(extra="ignore")
@@ -173,8 +247,87 @@ def get_default_config():
             taxonomy_path=DEFAULT_TAXONOMY_PATH,
             taxonomy_base=DEFAULT_TAXONOMY_BASE,
         ),
-        serve=_serve(model_path=DEFAULT_MODEL_PATH),
+        serve=_serve(
+            model_path=DEFAULT_MODEL_PATH,
+            llama_cpp=_serve_llama_cpp(
+                gpu_layers=-1,
+                max_ctx_size=4096,
+                llm_family="",
+            ),
+            vllm=_serve_vllm(
+                vllm_args="",
+            ),
+        ),
+        train=_train(
+            train_args=TrainingArgs(
+                model_path=DEFAULT_MODEL_REPO,
+                data_path="./taxonomy_data",
+                ckpt_output_dir=DEFAULT_CKPT_DIR,
+                data_output_dir=DEFAULT_OUT_DIR,
+                max_seq_len=4096,
+                max_batch_len=10000,
+                num_epochs=10,
+                effective_batch_size=3840,
+                save_samples=250000,
+                learning_rate=2e-6,
+                warmup_steps=800,
+                is_padding_free=False,
+                random_seed=42,
+                lora=LoraOptions(
+                    rank=4,
+                    alpha=32,
+                    dropout=0.1,
+                    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                ),
+                deepspeed_options=DeepSpeedOptions(
+                    cpu_offload_optimizer=False,
+                    cpu_offload_optimizer_ratio=1,
+                    cpu_offload_optimizer_pin_memory=False,
+                ),
+            ),
+            torch_args=TorchrunArgs(
+                node_rank=0,
+                nnodes=1,
+                nproc_per_node=1,
+                rdzv_id=123,
+                rdzv_endpoint="127.0.0.1:12222",
+            ),
+        ),
+        evaluate=_evaluate(
+            base_model=DEFAULT_MODEL_REPO,
+            mt_bench=_mtbench(
+                judge_model=DEFAULT_JUDGE_MODEL_MT,
+                output_dir=DEFAULT_EVAL_PATH,
+                max_workers=40,
+            ),
+            mmlu=_mmlu(
+                few_shots=2,
+                batch_size=5,
+            ),
+            mt_bench_branch=_mtbenchbranch(taxonomy_path=DEFAULT_TAXONOMY_PATH),
+            mmlu_branch=_mmlubranch(sdg_path=DEFAULT_GENERATED_FILES_OUTPUT_DIR),
+        ),
     )
+
+
+def read_train_profile(train_file):
+    try:
+        with open(train_file, "r", encoding="utf-8") as yamlfile:
+            content = yaml.safe_load(yamlfile)
+            return _train(**content)
+    except ValidationError as exc:
+        msg = f"{exc.error_count()} errors in {train_file}:\n"
+        for err in exc.errors():
+            msg += (
+                "- "
+                + err.get("type", "")
+                + " "
+                + "->".join(err.get("loc", ""))
+                + ": "
+                + err.get("msg", "").lower()
+                + "\n"
+            )
+        raise ConfigException(msg) from exc
 
 
 def read_config(config_file=DEFAULT_CONFIG):
@@ -206,7 +359,9 @@ def get_dict(cfg):
 def write_config(cfg, config_file=DEFAULT_CONFIG):
     """Writes configuration to a disk"""
     with open(config_file, "w", encoding="utf-8") as yamlfile:
-        yaml.safe_dump(get_dict(cfg), stream=yamlfile)
+        d = cfg.model_dump_json()
+        loaded = yaml.load(d, Loader=yaml.SafeLoader)
+        yaml.dump(loaded, stream=yamlfile)
 
 
 def get_api_base(host_port):
@@ -215,6 +370,7 @@ def get_api_base(host_port):
 
 
 def get_model_family(forced, model_path):
+    forced = MODEL_FAMILY_MAPPINGS.get(forced, forced)
     if forced and forced.lower() not in MODEL_FAMILIES:
         raise ConfigException("Unknown model family: %s" % forced)
 
@@ -231,23 +387,6 @@ class Lab:
     def __init__(self, config_obj: Config):
         self.config = config_obj
 
-        # Set up logging for the Lab class
-        self.logger = logging.getLogger(__name__)
-
-        # Create a formatter
-        formatter = log.CustomFormatter(log.FORMAT)
-
-        # Create a handler and set the formatter
-        handler = logging.StreamHandler()
-        handler.setFormatter(formatter)
-
-        logging.basicConfig(
-            format=log.FORMAT,
-            handlers=[handler],
-        )
-
-        self.logger.setLevel(self.config.general.log_level.upper())
-
 
 def init(ctx, config_file):
     if (
@@ -259,7 +398,7 @@ def init(ctx, config_file):
         elif not os.path.isfile(config_file):
             config_obj = None
             ctx.fail(
-                f"`{config_file}` does not exists, please run `ilab init` "
+                f"`{config_file}` does not exists, please run `ilab config init` "
                 "or point to a valid configuration file using `--config=<path>`."
             )
         else:
@@ -267,6 +406,30 @@ def init(ctx, config_file):
                 config_obj = read_config(config_file)
             except ConfigException as ex:
                 raise click.ClickException(str(ex))
+        # setup logging
+        log.configure_logging(log_level=config_obj.general.log_level.upper())
         ctx.obj = Lab(config_obj)
         # default_map holds a dictionary with default values for each command parameters
-        ctx.default_map = get_dict(ctx.obj.config)
+        config_dict = get_dict(ctx.obj.config)
+        # since torch and train args are sep, they need to be combined into a single `train` entity for the default map
+        # this is because the flags for `ilab model train` will only be populated if the default map has a single `train` entry, not two.
+        config_dict["train"] = (
+            config_dict["train"]["train_args"]
+            | config_dict["train"]["torch_args"]
+            | config_dict["train"]["train_args"]["lora"]
+            | config_dict["train"]["train_args"]["deepspeed_options"]
+        )
+        config_dict["evaluate"] = (
+            config_dict["evaluate"]
+            | config_dict["evaluate"]["mmlu"]
+            | config_dict["evaluate"]["mmlu_branch"]
+            | config_dict["evaluate"]["mt_bench"]
+            | config_dict["evaluate"]["mt_bench_branch"]
+        )
+        # need to delete the individual sub-classes from the map
+        del config_dict["evaluate"]["mmlu"]
+        del config_dict["evaluate"]["mmlu_branch"]
+        del config_dict["evaluate"]["mt_bench"]
+        del config_dict["evaluate"]["mt_bench_branch"]
+
+        ctx.default_map = config_dict

@@ -69,6 +69,42 @@ def _torch_cuda_info() -> typing.Dict[str, typing.Any]:
     return info
 
 
+def _torch_hpu_info() -> typing.Dict[str, typing.Any]:
+    """Intel Gaudi (HPU) devices"""
+    # pylint: disable=import-outside-toplevel
+    # Third Party
+    import torch
+
+    try:
+        # Third Party
+        from habana_frameworks.torch import hpu
+    except ImportError:
+        return {}
+
+    info = {
+        # 'habana_frameworks' has package name 'habana_torch_plugin'
+        "habana_torch_plugin.version": importlib.metadata.version(
+            "habana_torch_plugin"
+        ),
+        "torch.hpu.is_available": hpu.is_available(),
+    }
+
+    if not info["torch.hpu.is_available"]:
+        return info
+
+    info["torch.hpu.device_count"] = hpu.device_count()
+    for idx in range(hpu.device_count()):
+        device = torch.device("hpu", idx)
+        info[f"torch.hpu.{idx}.name"] = hpu.get_device_name(device)
+        info[f"torch.hpu.{idx}.capability"] = hpu.get_device_capability(device)
+        prop: str = hpu.get_device_properties(device)
+        info[f"torch.hpu.{idx}.properties"] = prop.strip("()")
+    for key, value in sorted(os.environ.items()):
+        if key.startswith(("PT_", "HABANA", "LOG_LEVEL_", "ENABLE_CONSOLE")):
+            info[f"env.{key}"] = value
+    return info
+
+
 def _llama_cpp_info() -> typing.Dict[str, typing.Any]:
     """llama-cpp-python capabilities"""
     # pylint: disable=import-outside-toplevel
@@ -81,14 +117,25 @@ def _llama_cpp_info() -> typing.Dict[str, typing.Any]:
     }
 
 
+def _instructlab_info():
+    """InstructLab packages"""
+    # auto-detect all instructlab packages
+    pkgs = sorted(
+        (dist.name, dist.version)
+        for dist in importlib.metadata.distributions()
+        if dist.name.startswith("instructlab")
+    )
+    return {f"{name}.version": ver for name, ver in pkgs}
+
+
 def get_sysinfo() -> typing.Dict[str, typing.Any]:
     """Get system information"""
-    info = {
-        "instructlab.version": importlib.metadata.version("instructlab"),
-    }
+    info = {}
     info.update(_platform_info())
+    info.update(_instructlab_info())
     info.update(_torch_info())
     info.update(_torch_cuda_info())
+    info.update(_torch_hpu_info())
     info.update(_llama_cpp_info())
     return info
 
