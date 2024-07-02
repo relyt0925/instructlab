@@ -1,23 +1,33 @@
 # Standard
+import enum
+import logging
 import os
-import subprocess
-import time
+import typing
 
 # Third Party
-from instructlab.eval.evaluator import Evaluator
-from instructlab.eval.mmlu import MMLUBranchEvaluator, MMLUEvaluator
-from instructlab.eval.mt_bench import MTBenchBranchEvaluator, MTBenchEvaluator
 import click
 
-BENCHMARK_TO_CLASS_MAP = {
-    "mmlu": MMLUEvaluator,
-    "mmlu_branch": MMLUBranchEvaluator,
-    "mt_bench": MTBenchEvaluator,
-    "mt_bench_branch": MTBenchBranchEvaluator,
-}
+# Local
+from ..utils import http_client
 
-# TODO: Remove after proper vLLM integration
-# pylint: disable=consider-using-with
+if typing.TYPE_CHECKING:
+    # Third Party
+    from instructlab.eval.evaluator import Evaluator
+
+logger = logging.getLogger(__name__)
+
+
+JUDGE_MODEL_NAME = "judge_model"
+TEST_MODEL_NAME = "test_model"
+BASE_TEST_MODEL_NAME = "base_test_model"
+
+
+# Python 3.10 does not have StrEnum
+class Benchmark(str, enum.Enum):
+    MMLU = "mmlu"
+    MMLU_BRANCH = "mmlu_branch"
+    MT_BENCH = "mt_bench"
+    MT_BENCH_BRANCH = "mt_bench_branch"
 
 
 def get_evaluator(
@@ -33,14 +43,24 @@ def get_evaluator(
     few_shots,
     batch_size,
     sdg_path,
-) -> Evaluator:
+) -> "Evaluator":
     """takes in arguments from the CLI and uses 'benchmark' to validate other arguments
     if all needed configuration is present, returns the appropriate Evaluator class for the benchmark
     otherwise raises an exception for the missing values
     """
+    # Third Party
+    from instructlab.eval.mmlu import MMLUBranchEvaluator, MMLUEvaluator
+    from instructlab.eval.mt_bench import MTBenchBranchEvaluator, MTBenchEvaluator
+
+    benchmark_map = {
+        Benchmark.MMLU: MMLUEvaluator,
+        Benchmark.MMLU_BRANCH: MMLUBranchEvaluator,
+        Benchmark.MT_BENCH: MTBenchEvaluator,
+        Benchmark.MT_BENCH_BRANCH: MTBenchBranchEvaluator,
+    }
 
     # ensure skills benchmarks have proper arguments if selected
-    if benchmark in ["mt_bench", "mt_bench_branch"]:
+    if benchmark in {Benchmark.MT_BENCH, Benchmark.MT_BENCH_BRANCH}:
         required_args = [
             model,
             judge_model,
@@ -51,7 +71,7 @@ def get_evaluator(
             "model",
             "judge-model",
         ]
-        if benchmark == "mt_bench_branch":
+        if benchmark == Benchmark.MT_BENCH_BRANCH:
             required_args.append(taxonomy_path)
             required_args.append(branch)
             required_args.append(base_branch)
@@ -66,12 +86,14 @@ def get_evaluator(
                 fg="red",
             )
             raise click.exceptions.Exit(1)
-        evaluator_class = BENCHMARK_TO_CLASS_MAP[benchmark]
-        if benchmark == "mt_bench":
-            return evaluator_class("test_model", "judge_model", output_dir, max_workers)
+        evaluator_class = benchmark_map[benchmark]
+        if benchmark == Benchmark.MT_BENCH:
+            return evaluator_class(
+                TEST_MODEL_NAME, JUDGE_MODEL_NAME, output_dir, max_workers
+            )
         return evaluator_class(
-            "test_model",
-            "judge_model",
+            TEST_MODEL_NAME,
+            JUDGE_MODEL_NAME,
             taxonomy_path,
             branch,
             output_dir,
@@ -79,10 +101,10 @@ def get_evaluator(
         )
 
     # ensure knowledge benchmarks have proper arguments if selected
-    if benchmark in ["mmlu", "mmlu_branch"]:
+    if benchmark in [Benchmark.MMLU, Benchmark.MMLU_BRANCH]:
         required_args = [model, few_shots, batch_size]
         required_arg_names = ["model"]
-        if benchmark == "mmlu_branch":
+        if benchmark == Benchmark.MMLU_BRANCH:
             required_args.append(sdg_path)
             required_args.append(base_model)
             required_arg_names.append("sdg-path")
@@ -93,8 +115,8 @@ def get_evaluator(
                 fg="red",
             )
             raise click.exceptions.Exit(1)
-        evaluator_class = BENCHMARK_TO_CLASS_MAP[benchmark]
-        if benchmark == "mmlu":
+        evaluator_class = benchmark_map[benchmark]
+        if benchmark == Benchmark.MMLU:
             min_tasks = os.environ.get("INSTRUCTLAB_EVAL_MMLU_MIN_TASKS")
             if min_tasks is not None:
                 tasks = ["mmlu_abstract_algebra", "mmlu_anatomy", "mmlu_astronomy"]
@@ -191,6 +213,41 @@ def qa_pairs_to_qna_to_avg_scores(qa_pairs: list[dict]) -> dict:
     return qna_to_avg_scores
 
 
+def launch_server(
+    ctx,
+    model,
+    model_name,
+    max_workers,
+) -> tuple:
+    # pylint: disable=import-outside-toplevel
+    # First Party
+    from instructlab.model.backends import backends
+
+    if not ctx.obj.config.serve.backend:
+        ctx.obj.config.serve.backend = backends.VLLM
+    if ctx.obj.config.serve.backend == backends.VLLM:
+        ctx.obj.config.serve.vllm.vllm_args.extend(["--served-model-name", model_name])
+    elif ctx.obj.config.serve.backend == backends.LLAMA_CPP:
+        # mt_bench requires a larger context size
+        ctx.obj.config.serve.llama_cpp.max_ctx_size = 5120
+        # llama-cpp fails fast on too many incoming requests and returns errors to client
+        ctx.obj.config.evaluate.mt_bench.max_workers = min(max_workers, 16)
+
+    ctx.obj.config.serve.model_path = model
+
+    backend_instance = backends.select_backend(logger, ctx.obj.config.serve)
+    try:
+        # http_client is handling tls params
+        backend_instance.run_detached(http_client(ctx.params))
+        api_base = backend_instance.api_base
+    except Exception as exc:
+        click.secho(f"Failed to start server: {exc}", fg="red")
+        raise click.exceptions.Exit(1)
+    if not api_base:
+        api_base = ctx.obj.config.serve.api_base()
+    return backend_instance, api_base
+
+
 @click.command()
 @click.option(
     "--model",
@@ -204,8 +261,7 @@ def qa_pairs_to_qna_to_avg_scores(qa_pairs: list[dict]) -> dict:
 )
 @click.option(
     "--benchmark",
-    type=click.Choice(list(BENCHMARK_TO_CLASS_MAP.keys())),
-    # case_sensitive=False,
+    type=click.Choice([m.value for m in Benchmark.__members__.values()]),
     help="Benchmarks to run during evaluation",
 )
 @click.option(
@@ -253,9 +309,34 @@ def qa_pairs_to_qna_to_avg_scores(qa_pairs: list[dict]) -> dict:
     type=click.Path(),
     help="Path where all the MMLU Branch tasks are stored. Needed for running mmlu_branch.",
 )
+@click.option(
+    "--tls-insecure",
+    is_flag=True,
+    help="Disable TLS verification for model serving.",
+)
+@click.option(
+    "--tls-client-cert",
+    type=click.Path(),
+    default="",
+    show_default=True,
+    help="Path to the TLS client certificate to use for model serving.",
+)
+@click.option(
+    "--tls-client-key",
+    type=click.Path(),
+    default="",
+    show_default=True,
+    help="Path to the TLS client key to use for model serving.",
+)
+@click.option(
+    "--tls-client-passwd",
+    type=click.STRING,
+    default="",
+    help="TLS client certificate password for model serving.",
+)
 @click.pass_context
 def evaluate(
-    ctx,  # pylint: disable=unused-argument
+    ctx,
     model,
     base_model,
     benchmark,
@@ -268,6 +349,10 @@ def evaluate(
     few_shots,
     batch_size,
     sdg_path,
+    tls_insecure,  # pylint: disable=unused-argument
+    tls_client_cert,  # pylint: disable=unused-argument
+    tls_client_key,  # pylint: disable=unused-argument
+    tls_client_passwd,  # pylint: disable=unused-argument
 ):
     # get appropriate evaluator class from Eval lib
     evaluator = get_evaluator(
@@ -285,72 +370,55 @@ def evaluate(
         sdg_path,
     )
 
-    if benchmark == "mt_bench":
-        # TODO: Replace temp Popen hack with serving library calls. Current library doesn't support server-model-name.
+    if benchmark == Benchmark.MT_BENCH:
         print("Generating answers...")
-        proc = None
+        server = None
         try:
-            proc = subprocess.Popen(
-                [
-                    "python",
-                    "-m",
-                    "vllm.entrypoints.openai.api_server",
-                    "--model",
-                    model,
-                    "--tensor-parallel-size",
-                    "1",
-                    "--served-model-name",
-                    "test_model",
-                ]
+            server, api_base = launch_server(
+                ctx,
+                model,
+                TEST_MODEL_NAME,
+                max_workers,
             )
-            time.sleep(60)
-            evaluator.gen_answers("http://localhost:8000/v1")
+            evaluator.gen_answers(api_base)
         finally:
-            if proc:
-                proc.terminate()
+            if server is not None:
+                server.shutdown()
 
         print("Evaluating answers...")
-        proc = None
         try:
-            proc = subprocess.Popen(
-                [
-                    "python",
-                    "-m",
-                    "vllm.entrypoints.openai.api_server",
-                    "--model",
-                    judge_model,
-                    "--tensor-parallel-size",
-                    "1",
-                    "--served-model-name",
-                    "judge_model",
-                ]
+            server, api_base = launch_server(
+                ctx,
+                judge_model,
+                JUDGE_MODEL_NAME,
+                max_workers,
             )
-            time.sleep(60)
-            overall_score, qa_pairs, turn_scores = evaluator.judge_answers(
-                "http://localhost:8000/v1"
-            )
-            print("# SKILL EVALUATION REPORT")
-            display_model(model)
-            print("\n### AVERAGE:")
-            print(f"{round(overall_score, 2)} (across {len(qa_pairs)})")
-            print("\n### TURN ONE:")
-            print(round(turn_scores[0], 2))
-            print("\n### TURN TWO:")
-            turn2_score = turn_scores[1]
-            if isinstance(turn2_score, float):
-                turn2_score = round(turn2_score, 2)
-            print(turn2_score)
+            overall_score, qa_pairs, turn_scores = evaluator.judge_answers(api_base)
         finally:
-            if proc:
-                proc.terminate()
+            if server is not None:
+                server.shutdown()
 
-    elif benchmark == "mt_bench_branch":
-        # TODO: Replace temp Popen hack with serving library calls.  Current library doesn't support server-model-name.
+        print("# SKILL EVALUATION REPORT")
+        display_model(model)
+        print("\n### AVERAGE:")
+        print(f"{round(overall_score, 2)} (across {len(qa_pairs)})")
+        print("\n### TURN ONE:")
+        print(round(turn_scores[0], 2))
+        print("\n### TURN TWO:")
+        turn2_score = turn_scores[1]
+        if isinstance(turn2_score, float):
+            turn2_score = round(turn2_score, 2)
+        print(turn2_score)
+
+    elif benchmark == Benchmark.MT_BENCH_BRANCH:
+        # Third Party
+        from instructlab.eval.mt_bench import MTBenchBranchEvaluator
+
         evaluators = [
             evaluator,
             MTBenchBranchEvaluator(
-                "base_test_model",
-                "base_judge_model",
+                BASE_TEST_MODEL_NAME,
+                JUDGE_MODEL_NAME,
                 taxonomy_path,
                 base_branch,
                 output_dir,
@@ -359,58 +427,46 @@ def evaluate(
         ]
         branches = [branch, base_branch]
         m_paths = [model, base_model]
-        m_names = ["test_model", "base_test_model"]
-        judge_model_names = ["judge_model", "base_judge_model"]
+        m_names = [TEST_MODEL_NAME, BASE_TEST_MODEL_NAME]
         qa_pairs_list = []
+        server = None
 
         for i, evaluator in enumerate(evaluators):
             branch = branches[i]
             m_path = m_paths[i]
             m_name = m_names[i]
-            j_model_name = judge_model_names[i]
 
             print(
                 f"Generating questions and reference answers from qna files for branch {branch}..."
             )
             try:
-                proc = subprocess.Popen(
-                    [
-                        "python",
-                        "-m",
-                        "vllm.entrypoints.openai.api_server",
-                        "--model",
-                        m_path,
-                        "--tensor-parallel-size",
-                        "1",
-                        "--served-model-name",
-                        m_name,
-                    ]
+                server, api_base = launch_server(
+                    ctx,
+                    m_path,
+                    m_name,
+                    max_workers,
                 )
-                time.sleep(60)
-                evaluator.gen_answers("http://localhost:8000/v1")
+                evaluator.gen_answers(api_base)
             finally:
-                proc.terminate()
+                if server is not None:
+                    server.shutdown()
 
-            print(f"Evaluating answers for branch {branch}...")
-            try:
-                proc = subprocess.Popen(
-                    [
-                        "python",
-                        "-m",
-                        "vllm.entrypoints.openai.api_server",
-                        "--model",
-                        judge_model,
-                        "--tensor-parallel-size",
-                        "1",
-                        "--served-model-name",
-                        j_model_name,
-                    ]
-                )
-                time.sleep(60)
-                qa_pairs = evaluator.judge_answers("http://localhost:8000/v1")
+        try:
+            # Share the judge model server for the two model evaluations
+            server, api_base = launch_server(
+                ctx,
+                judge_model,
+                JUDGE_MODEL_NAME,
+                max_workers,
+            )
+            for i, evaluator in enumerate(evaluators):
+                branch = branches[i]
+                print(f"Evaluating answers for branch {branch}...")
+                qa_pairs = evaluator.judge_answers(api_base)
                 qa_pairs_list.append(qa_pairs)
-            finally:
-                proc.terminate()
+        finally:
+            if server is not None:
+                server.shutdown()
 
         qa_pairs = qa_pairs_list[0]
         base_qa_pairs = qa_pairs_list[1]
@@ -437,7 +493,7 @@ def evaluate(
         # display summary of evaluation before exiting
         display_branch_eval_summary(improvements, regressions, no_changes, new_qnas)
 
-    elif benchmark == "mmlu":
+    elif benchmark == Benchmark.MMLU:
         overall_score, individual_scores = evaluator.run()
 
         print("# KNOWLEDGE EVALUATION REPORT")
@@ -450,8 +506,10 @@ def evaluate(
             s = round(score["score"], 2)
             print(f"{task} - {s}")
 
-    elif benchmark == "mmlu_branch":
-        # TODO: Need to resolve the appropriate task list for the branches involved
+    elif benchmark == Benchmark.MMLU_BRANCH:
+        # Third Party
+        from instructlab.eval.mmlu import MMLUBranchEvaluator
+
         evaluators = [
             evaluator,
             MMLUBranchEvaluator(
