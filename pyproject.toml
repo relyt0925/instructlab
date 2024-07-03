@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [build-system]
-requires = ["setuptools>=64", "setuptools_scm>=8"]
+requires = ["setuptools>=70.1.0", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -143,3 +143,23 @@ exclude = [
 ]
 # honor excludes by not following there through imports
 follow_imports = "silent"
+
+[tool.coverage.run]
+branch = false
+relative_files = true
+source = ["instructlab", "tests/"]
+omit = [
+  # omit instructlab code in different packages
+  "*/instructlab/dolomite/*",
+  "*/instructlab/eval/*",
+  "*/instructlab/schema/*",
+  "*/instructlab/sdg/*",
+  "*/instructlab/training/*",
+]
+
+[tool.coverage.paths]
+source = ["src/instructlab", "*.tox/*/lib*/python*/site-packages/instructlab"]
+tests = ["tests/"]
+
+[tool.coverage.report]
+exclude_lines = ["@abc.abstractmethod", "if typing.TYPE_CHECKING"]

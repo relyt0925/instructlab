@@ -17,6 +17,7 @@ import sys
 # Third Party
 from uvicorn import Config
 import click
+import httpx
 import uvicorn
 
 # Local
@@ -77,7 +78,7 @@ class BackendServer(abc.ABC):
         """Run serving backend in foreground (ilab model serve)"""
 
     @abc.abstractmethod
-    def run_detached(self, http_client):
+    def run_detached(self, http_client: httpx.Client | None = None) -> str:
         """Run serving backend in background ('ilab model chat' when server is not running)"""
 
     @abc.abstractmethod
@@ -110,21 +111,6 @@ def is_model_gguf(model_path: pathlib.Path) -> bool:
         mmapped_file.close()
 
         return first_four_bytes_int == GGUF_MAGIC
-
-
-def validate_backend(backend: str) -> None:
-    """
-    Validate the backend.
-    Args:
-        backend (str): The backend to validate.
-    Raises:
-        ValueError: If the backend is not supported.
-    """
-    # lowercase backend for comparison in case of user input like 'Llama'
-    if backend.lower() not in SUPPORTED_BACKENDS:
-        raise ValueError(
-            f"Backend '{backend}' is not supported. Supported: {', '.join(SUPPORTED_BACKENDS)}"
-        )
 
 
 def determine_backend(model_path: pathlib.Path) -> str:
@@ -172,7 +158,7 @@ def get(logger: logging.Logger, model_path: pathlib.Path, backend: str) -> str:
     # When the backend is not set using the --backend flag, determine the backend automatically
     # 'backend' is optional so we still check for None or empty string in case 'config.yaml' hasn't
     # been updated via 'ilab config init'
-    if backend is None or backend == "":
+    if backend is None:
         logger.debug(
             f"Backend is not set using auto-detected value: {auto_detected_backend}"
         )
@@ -180,7 +166,6 @@ def get(logger: logging.Logger, model_path: pathlib.Path, backend: str) -> str:
     # If the backend was set using the --backend flag, validate it.
     else:
         logger.debug(f"Validating '{backend}' backend")
-        validate_backend(backend)
         # TODO: keep this code logic and implement a `--force` flag to override the auto-detected backend
         # If the backend was set explicitly, but we detected the model should use a different backend, raise an error
         # if backend != auto_detected_backend:
@@ -230,7 +215,7 @@ def ensure_server(
             api_base=api_base,
             http_client=http_client,
         )
-        return (None, None, None)
+        return (None, None, api_base)
         # pylint: enable=duplicate-code
     except ClientException:
         port = free_tcp_ipv4_port(host)
