@@ -520,6 +520,7 @@ def train(
         # pull the trainrandom.randinting and torch args from the flags
         # the flags are populated from the config as a base.
         params = ctx.params
+        params["lora_quantize_dtype"] = None
 
         if os.path.isdir(data_path):
             click.secho(
