@@ -529,6 +529,7 @@ def train(
             )
             raise click.exceptions.Exit(1)
         train_args, torch_args = map_train_to_library(params)
+        train_args.lora = None
         try:
             run_training(train_args=train_args, torch_args=torch_args)
         # unsure what types of exceptions training library returns, this will catch all for now
