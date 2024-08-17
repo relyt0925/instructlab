@@ -647,6 +647,7 @@ def train(
         # pull the trainrandom.randinting and torch args from the flags
         # the flags are populated from the config as a base.
         train_args, torch_args = map_train_to_library(ctx, ctx.params)
+        train_args.lora = None
         logger.debug(
             "Rendered training arguments:\n%s", pprint.pformat(train_args.model_dump())
         )
