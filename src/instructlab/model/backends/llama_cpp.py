@@ -25,16 +25,16 @@ from .backends import (
     ServerException,
     UvicornServer,
     free_tcp_ipv4_port,
-    get_model_template,
     get_uvicorn_config,
     is_temp_server_running,
-    verify_template_exists,
 )
 from .common import (
     API_ROOT_WELCOME_MESSAGE,
     CHAT_TEMPLATE_AUTO,
     CHAT_TEMPLATE_TOKENIZER,
     LLAMA_CPP,
+    get_model_template,
+    verify_template_exists,
 )
 
 logger = logging.getLogger(__name__)
