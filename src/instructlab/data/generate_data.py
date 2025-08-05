@@ -191,7 +191,7 @@ def create_server_and_generate(
             batch_size = 0
 
     client = openai.OpenAI(
-        base_url=api_base, api_key=api_key, http_client=http_client(http_client_params)
+        base_url=api_base, max_retries=15, api_key=api_key, http_client=http_client(http_client_params)
     )
     # Third Party
     from instructlab.sdg.generate_data import generate_data
