@@ -165,6 +165,13 @@ logger = logging.getLogger(__name__)
 @click.option(
     "-dt", "--detached", is_flag=True, help="Run ilab data generate in the background"
 )
+@click.option(
+    "--openai-client-max-retries",
+    type=click.INT,
+    default=DEFAULTS.OPENAI_CLIENT_MAX_RETRIES,
+    show_default=True,
+    help="Max retries for the openai client used to interact with teacher model.",
+)
 @click.pass_context
 @clickext.display_params
 def generate(
@@ -193,6 +200,9 @@ def generate(
     gpus,
     max_num_tokens,
     detached,
+    student_model_id: str | None,
+    teacher_model_id: str | None,
+    openai_client_max_retries: int,
 ):
     """Generates synthetic data to enhance your example data"""
 
@@ -299,6 +309,7 @@ def generate(
             legacy_pretraining_format,
             process_mode=process_mode,
             log_level=ctx.obj.config.general.log_level,
+            openai_client_max_retries=openai_client_max_retries,
         )
         if not detached:
             click.echo("ᕦ(òᴗóˇ)ᕤ Data generate completed successfully! ᕦ(òᴗóˇ)ᕤ")
