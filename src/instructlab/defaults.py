@@ -110,6 +110,7 @@ class _InstructlabDefaults:
     SDG_SCALE_FACTOR = 30
     SDG_MAX_NUM_TOKENS = 4096
     OPENAI_CLIENT_MAX_RETRIES = 2
+    ESTIMATED_TOKENS_PER_SDG_SAMPLE = 1500
 
     # When otherwise unknown, ilab uses this as the default family
     MODEL_FAMILY = "granite"
