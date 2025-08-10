@@ -193,6 +193,7 @@ def create_server_and_generate(
                 )
             batch_size = 0
 
+    logger.info("TL Retry value: %d", openai_client_max_retries)
     client = openai.OpenAI(
         base_url=api_base,
         max_retries=openai_client_max_retries,
