@@ -200,8 +200,6 @@ def generate(
     gpus,
     max_num_tokens,
     detached,
-    student_model_id: str | None,
-    teacher_model_id: str | None,
     openai_client_max_retries: int,
 ):
     """Generates synthetic data to enhance your example data"""
